@@ -25,7 +25,6 @@ const (
 )
 
 var (
-	panes        = []string{viewUnits, viewDetail, viewProc, viewLogs}
 	roundedBox   = []rune{'─', '│', '╭', '╮', '╰', '╯', '├', '┤', '┬', '┴', '┼'}
 	unitKindTabs = []unitKind{
 		{label: "Units", systemctlTypes: []string{"service", "timer"}},
@@ -45,6 +44,17 @@ var (
 		{key: 'M', action: "unmask"},
 	}
 )
+
+type paneSpec struct {
+	viewName string
+	label    func(*app) string
+	help     func(*app) string
+	cycle    func(*app, int)
+	scroll   func(*app, int)
+	jumpTop  func(*app)
+	jumpEnd  func(*app)
+	render   func(*app, *gocui.View)
+}
 
 type unitKind struct {
 	label          string
@@ -133,7 +143,6 @@ type app struct {
 	selected       int
 	unitOffset     int
 	systemOffset   int
-	detailOffset   int
 	procOffset     int
 	logOffset      int
 	filter         string
@@ -200,6 +209,122 @@ func run() error {
 	return err
 }
 
+func (a *app) paneSpecs() []paneSpec {
+	return []paneSpec{
+		{
+			viewName: viewUnits,
+			label:    func(a *app) string { return a.unitTabs.label(func(kind unitKind) string { return kind.label }) },
+			help:     func(*app) string { return "j/k move | [/]/ tab | / filter | s/x/R service" },
+			cycle:    func(a *app, delta int) { a.cycleUnitTab(delta) },
+			scroll:   func(a *app, delta int) { a.moveSelection(delta) },
+			jumpTop:  func(a *app) { a.jumpUnitsTop() },
+			jumpEnd:  func(a *app) { a.jumpUnitsBottom() },
+			render:   func(a *app, view *gocui.View) { a.renderUnitsPane(view) },
+		},
+		{
+			viewName: viewDetail,
+			label:    func(a *app) string { return a.systemTabs.current() },
+			help:     func(*app) string { return "j/k scroll | [/]/ tab | system diagnostics" },
+			cycle:    func(a *app, delta int) { a.cycleSystemTab(delta) },
+			scroll:   func(a *app, delta int) { a.scrollTextPane(&a.systemOffset, a.systemContent(), delta) },
+			jumpTop:  func(a *app) { a.jumpTextPaneTop(&a.systemOffset) },
+			jumpEnd:  func(a *app) { a.jumpTextPaneEnd(&a.systemOffset, a.systemContent()) },
+			render: func(a *app, view *gocui.View) {
+				a.renderTextPane(view, a.systemContent(), &a.systemOffset, "No system diagnostics loaded.")
+			},
+		},
+		{
+			viewName: viewProc,
+			label:    func(a *app) string { return a.infoTabs.current() },
+			help:     func(*app) string { return "j/k scroll | [/]/ tab | selected unit info" },
+			cycle:    func(a *app, delta int) { a.cycleInfoTab(delta) },
+			scroll:   func(a *app, delta int) { a.scrollTextPane(&a.procOffset, a.infoContent(), delta) },
+			jumpTop:  func(a *app) { a.jumpTextPaneTop(&a.procOffset) },
+			jumpEnd:  func(a *app) { a.jumpTextPaneEnd(&a.procOffset, a.infoContent()) },
+			render: func(a *app, view *gocui.View) {
+				a.renderTextPane(view, a.infoContent(), &a.procOffset, "No unit selected.")
+			},
+		},
+		{
+			viewName: viewLogs,
+			label:    func(a *app) string { return a.debugTabs.current() },
+			help:     func(*app) string { return "j/k scroll | [/]/ tab | debug details" },
+			cycle:    func(a *app, delta int) { a.cycleDebugTab(delta) },
+			scroll:   func(a *app, delta int) { a.scrollTextPane(&a.logOffset, a.debugContent(), delta) },
+			jumpTop:  func(a *app) { a.jumpTextPaneTop(&a.logOffset) },
+			jumpEnd:  func(a *app) { a.jumpTextPaneEnd(&a.logOffset, a.debugContent()) },
+			render: func(a *app, view *gocui.View) {
+				a.renderTextPane(view, a.debugContent(), &a.logOffset, "No debug details loaded.")
+			},
+		},
+	}
+}
+
+func (a *app) focusedPaneSpec() paneSpec {
+	return a.paneSpec(a.focusedPane)
+}
+
+func (a *app) paneSpec(viewName string) paneSpec {
+	for _, pane := range a.paneSpecs() {
+		if pane.viewName == viewName {
+			return pane
+		}
+	}
+	return a.paneSpecs()[0]
+}
+
+func (a *app) focusedPaneIndex() int {
+	for i, pane := range a.paneSpecs() {
+		if pane.viewName == a.focusedPane {
+			return i
+		}
+	}
+	return 0
+}
+
+func (a *app) cycleUnitTab(delta int) {
+	a.mu.Lock()
+	a.unitTabs.cycle(delta)
+	a.selected = 0
+	a.unitOffset = 0
+	a.procOffset = 0
+	a.logOffset = 0
+	a.detail = ""
+	a.proc = ""
+	a.logs = ""
+	a.dependencies = ""
+	a.status = "Switched to " + a.currentKind().label + "."
+	a.mu.Unlock()
+	a.refresh()
+}
+
+func (a *app) cycleSystemTab(delta int) {
+	a.mu.Lock()
+	a.systemTabs.cycle(delta)
+	a.systemOffset = 0
+	a.status = "Switched to " + a.currentSystemTab() + "."
+	a.mu.Unlock()
+	a.loadSystem()
+}
+
+func (a *app) cycleInfoTab(delta int) {
+	a.mu.Lock()
+	a.infoTabs.cycle(delta)
+	a.procOffset = 0
+	a.status = "Switched to " + a.currentInfoTab() + "."
+	a.mu.Unlock()
+	a.render()
+}
+
+func (a *app) cycleDebugTab(delta int) {
+	a.mu.Lock()
+	a.debugTabs.cycle(delta)
+	a.logOffset = 0
+	a.status = "Switched to " + a.currentDebugTab() + "."
+	a.mu.Unlock()
+	a.render()
+}
+
 func (a *app) bindKeys() {
 	quit := func(*gocui.Gui, *gocui.View) error {
 		if a.closeFilter() {
@@ -253,13 +378,13 @@ func (a *app) bindKeys() {
 		return a.focusPrevious()
 	})
 
-	for i, pane := range panes {
+	for i, pane := range a.paneSpecs() {
 		i, pane := i, pane
 		a.g.SetKeybinding("", gocui.NewKeyRune(rune('1'+i)), func(*gocui.Gui, *gocui.View) error {
 			if a.filteringRune(rune('1' + i)) {
 				return nil
 			}
-			a.focusPane(pane)
+			a.focusPane(pane.viewName)
 			return nil
 		})
 	}
@@ -406,28 +531,24 @@ func (a *app) layout(g *gocui.Gui) error {
 	}
 	status.Frame = false
 
-	units.Title = a.titleFor(viewUnits, a.unitTabs.label(func(kind unitKind) string { return kind.label }))
-	system.Title = a.titleFor(viewDetail, a.systemTabs.current())
-	info.Title = a.titleFor(viewProc, a.infoTabs.current())
-	debug.Title = a.titleFor(viewLogs, a.debugTabs.current())
+	viewsByName := map[string]*gocui.View{
+		viewUnits:  units,
+		viewDetail: system,
+		viewProc:   info,
+		viewLogs:   debug,
+	}
+	for _, pane := range a.paneSpecs() {
+		view := viewsByName[pane.viewName]
+		view.Title = a.titleFor(pane.viewName, pane.label(a))
+	}
 
 	filtered := a.filteredUnits()
 	a.clampSelection(len(filtered))
 	a.keepSelectionVisible(units.InnerHeight())
 
-	units.SetContent(a.unitsContent(filtered, units.InnerWidth(), units.InnerHeight()))
-	if len(filtered) > 0 {
-		units.SetHighlight(a.selected-a.unitOffset+1, true)
+	for _, pane := range a.paneSpecs() {
+		pane.render(a, viewsByName[pane.viewName])
 	}
-	systemContent := a.systemContent()
-	infoContent := a.infoContent()
-	debugContent := a.debugContent()
-	a.systemOffset = clampScrollOffset(a.systemOffset, systemContent, system.InnerHeight())
-	a.procOffset = clampScrollOffset(a.procOffset, infoContent, info.InnerHeight())
-	a.logOffset = clampScrollOffset(a.logOffset, debugContent, debug.InnerHeight())
-	system.SetContent(visibleLines(emptyIfBlank(systemContent, "No system diagnostics loaded."), a.systemOffset, system.InnerHeight()))
-	info.SetContent(visibleLines(emptyIfBlank(infoContent, "No unit selected."), a.procOffset, info.InnerHeight()))
-	debug.SetContent(visibleLines(emptyIfBlank(debugContent, "No debug details loaded."), a.logOffset, debug.InnerHeight()))
 	status.SetContent(a.statusLine(len(filtered)))
 
 	if a.filtering {
@@ -543,7 +664,6 @@ func (a *app) loadSelected() {
 		a.proc = ""
 		a.logs = ""
 		a.dependencies = ""
-		a.detailOffset = 0
 		a.procOffset = 0
 		a.logOffset = 0
 		a.mu.Unlock()
@@ -585,7 +705,6 @@ func (a *app) loadSelected() {
 		} else {
 			a.dependencies = dependencies
 		}
-		a.detailOffset = 0
 		a.procOffset = 0
 		a.logOffset = 0
 		a.mu.Unlock()
@@ -647,20 +766,11 @@ func (a *app) moveOrScroll(delta int) error {
 	}
 
 	a.mu.Lock()
-	focusedPane := a.focusedPane
+	pane := a.focusedPaneSpec()
 	a.pendingG = false
 	a.mu.Unlock()
 
-	switch focusedPane {
-	case viewUnits:
-		a.moveSelection(delta)
-	case viewDetail:
-		a.scrollSystem(delta)
-	case viewProc:
-		a.scrollInfo(delta)
-	case viewLogs:
-		a.scrollDebug(delta)
-	}
+	pane.scroll(a, delta)
 	return nil
 }
 
@@ -686,52 +796,17 @@ func (a *app) clearPendingG() {
 
 func (a *app) jumpTop() {
 	a.mu.Lock()
-	reloadSelected := false
-	switch a.focusedPane {
-	case viewUnits:
-		a.selected = 0
-		a.unitOffset = 0
-		reloadSelected = true
-	case viewDetail:
-		a.systemOffset = 0
-	case viewProc:
-		a.procOffset = 0
-	case viewLogs:
-		a.logOffset = 0
-	}
-	a.status = "Jumped to top."
+	pane := a.focusedPaneSpec()
 	a.mu.Unlock()
-	if reloadSelected {
-		a.loadSelected()
-	}
-	a.render()
+	pane.jumpTop(a)
 }
 
 func (a *app) jumpBottom() {
 	a.mu.Lock()
-	reloadSelected := false
 	a.pendingG = false
-	switch a.focusedPane {
-	case viewUnits:
-		filtered := a.filteredUnits()
-		if len(filtered) > 0 {
-			a.selected = len(filtered) - 1
-			a.unitOffset = a.selected
-			reloadSelected = true
-		}
-	case viewDetail:
-		a.systemOffset = clampScrollOffset(1<<30, a.systemContent(), 1)
-	case viewProc:
-		a.procOffset = clampScrollOffset(1<<30, a.infoContent(), 1)
-	case viewLogs:
-		a.logOffset = clampScrollOffset(1<<30, a.debugContent(), 1)
-	}
-	a.status = "Jumped to bottom."
+	pane := a.focusedPaneSpec()
 	a.mu.Unlock()
-	if reloadSelected {
-		a.loadSelected()
-	}
-	a.render()
+	pane.jumpEnd(a)
 }
 
 func (a *app) moveSelection(delta int) {
@@ -748,24 +823,26 @@ func (a *app) moveSelection(delta int) {
 	a.render()
 }
 
-func (a *app) scrollSystem(delta int) {
+func (a *app) jumpUnitsTop() {
 	a.mu.Lock()
-	a.systemOffset = clampScrollOffset(a.systemOffset+delta, a.systemContent(), 1)
+	a.selected = 0
+	a.unitOffset = 0
+	a.status = "Jumped to top."
 	a.mu.Unlock()
+	a.loadSelected()
 	a.render()
 }
 
-func (a *app) scrollInfo(delta int) {
+func (a *app) jumpUnitsBottom() {
 	a.mu.Lock()
-	a.procOffset = clampScrollOffset(a.procOffset+delta, a.infoContent(), 1)
+	filtered := a.filteredUnits()
+	if len(filtered) > 0 {
+		a.selected = len(filtered) - 1
+		a.unitOffset = a.selected
+	}
+	a.status = "Jumped to bottom."
 	a.mu.Unlock()
-	a.render()
-}
-
-func (a *app) scrollDebug(delta int) {
-	a.mu.Lock()
-	a.logOffset = clampScrollOffset(a.logOffset+delta, a.debugContent(), 1)
-	a.mu.Unlock()
+	a.loadSelected()
 	a.render()
 }
 
@@ -792,7 +869,7 @@ func (a *app) focusPane(pane string) {
 	a.mu.Lock()
 	a.pendingG = false
 	a.focusedPane = pane
-	a.status = fmt.Sprintf("Focused %s.", paneLabel(a.focusedPane))
+	a.status = fmt.Sprintf("Focused %s.", a.focusedPaneSpec().label(a))
 	a.mu.Unlock()
 	a.render()
 }
@@ -800,10 +877,11 @@ func (a *app) focusPane(pane string) {
 func (a *app) moveFocus(delta int) {
 	a.mu.Lock()
 	a.pendingG = false
-	idx := paneIndex(a.focusedPane) + delta
+	panes := a.paneSpecs()
+	idx := a.focusedPaneIndex() + delta
 	idx = clamp(idx, 0, len(panes)-1)
-	a.focusedPane = panes[idx]
-	a.status = fmt.Sprintf("Focused %s.", paneLabel(a.focusedPane))
+	a.focusedPane = panes[idx].viewName
+	a.status = fmt.Sprintf("Focused %s.", panes[idx].label(a))
 	a.mu.Unlock()
 	a.render()
 }
@@ -811,43 +889,9 @@ func (a *app) moveFocus(delta int) {
 func (a *app) cycleActiveTab(delta int) {
 	a.mu.Lock()
 	a.pendingG = false
-	focusedPane := a.focusedPane
-	switch focusedPane {
-	case viewUnits:
-		a.unitTabs.cycle(delta)
-		a.selected = 0
-		a.unitOffset = 0
-		a.detailOffset = 0
-		a.procOffset = 0
-		a.logOffset = 0
-		a.detail = ""
-		a.proc = ""
-		a.logs = ""
-		a.dependencies = ""
-		a.status = "Switched to " + a.currentKind().label + "."
-		a.mu.Unlock()
-		a.refresh()
-	case viewDetail:
-		a.systemTabs.cycle(delta)
-		a.systemOffset = 0
-		a.status = "Switched to " + a.currentSystemTab() + "."
-		a.mu.Unlock()
-		a.loadSystem()
-	case viewProc:
-		a.infoTabs.cycle(delta)
-		a.procOffset = 0
-		a.status = "Switched to " + a.currentInfoTab() + "."
-		a.mu.Unlock()
-		a.render()
-	case viewLogs:
-		a.debugTabs.cycle(delta)
-		a.logOffset = 0
-		a.status = "Switched to " + a.currentDebugTab() + "."
-		a.mu.Unlock()
-		a.render()
-	default:
-		a.mu.Unlock()
-	}
+	pane := a.focusedPaneSpec()
+	a.mu.Unlock()
+	pane.cycle(a, delta)
 }
 
 func (a *app) toggleUserMode() {
@@ -859,7 +903,6 @@ func (a *app) toggleUserMode() {
 	a.selected = 0
 	a.unitOffset = 0
 	a.systemOffset = 0
-	a.detailOffset = 0
 	a.procOffset = 0
 	a.logOffset = 0
 	a.system = ""
@@ -956,6 +999,44 @@ func (a *app) unitsContent(units []unit, width int, height int) string {
 		fmt.Fprintln(&b, unitLine(units[i], width, i == a.selected))
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func (a *app) renderUnitsPane(view *gocui.View) {
+	filtered := a.filteredUnits()
+	a.clampSelection(len(filtered))
+	a.keepSelectionVisible(view.InnerHeight())
+	view.SetContent(a.unitsContent(filtered, view.InnerWidth(), view.InnerHeight()))
+	if len(filtered) > 0 {
+		view.SetHighlight(a.selected-a.unitOffset+1, true)
+	}
+}
+
+func (a *app) renderTextPane(view *gocui.View, content string, offset *int, emptyMessage string) {
+	*offset = clampScrollOffset(*offset, content, view.InnerHeight())
+	view.SetContent(visibleLines(emptyIfBlank(content, emptyMessage), *offset, view.InnerHeight()))
+}
+
+func (a *app) scrollTextPane(offset *int, content string, delta int) {
+	a.mu.Lock()
+	*offset = clampScrollOffset(*offset+delta, content, 1)
+	a.mu.Unlock()
+	a.render()
+}
+
+func (a *app) jumpTextPaneTop(offset *int) {
+	a.mu.Lock()
+	*offset = 0
+	a.status = "Jumped to top."
+	a.mu.Unlock()
+	a.render()
+}
+
+func (a *app) jumpTextPaneEnd(offset *int, content string) {
+	a.mu.Lock()
+	*offset = clampScrollOffset(1<<30, content, 1)
+	a.status = "Jumped to bottom."
+	a.mu.Unlock()
+	a.render()
 }
 
 func (a *app) keepSelectionVisible(height int) {
@@ -1118,18 +1199,7 @@ func (a *app) contextHelp() string {
 		return "type filter | enter/esc close"
 	}
 
-	switch a.focusedPane {
-	case viewUnits:
-		return "j/k move | [/]/ tab | / filter | s/x/R service"
-	case viewDetail:
-		return "j/k scroll | [/]/ tab | system diagnostics"
-	case viewProc:
-		return "j/k scroll | [/]/ tab | selected unit info"
-	case viewLogs:
-		return "j/k scroll | [/]/ tab | debug details"
-	default:
-		return "h/l panes | q quit"
-	}
+	return a.focusedPaneSpec().help(a)
 }
 
 func (a *app) render() {
@@ -1307,30 +1377,6 @@ func modeName(userMode bool) string {
 		return "user"
 	}
 	return "system"
-}
-
-func paneIndex(viewName string) int {
-	for i, pane := range panes {
-		if pane == viewName {
-			return i
-		}
-	}
-	return 0
-}
-
-func paneLabel(viewName string) string {
-	switch viewName {
-	case viewUnits:
-		return "units"
-	case viewDetail:
-		return "unit details"
-	case viewProc:
-		return "proc details"
-	case viewLogs:
-		return "journal"
-	default:
-		return viewName
-	}
 }
 
 func fitLine(value string, width int) string {

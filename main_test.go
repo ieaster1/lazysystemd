@@ -131,3 +131,19 @@ func TestInfoAndDebugContentFollowActiveTabs(t *testing.T) {
 	app.debugTabs.cycle(1)
 	assert.Equal(t, "dependency content", app.debugContent())
 }
+
+func TestPaneSpecsDefineStableNavigationOrder(t *testing.T) {
+	app := &app{
+		unitTabs:   newTabSet(unitKindTabs),
+		systemTabs: newTabSet(systemTabLabels),
+		infoTabs:   newTabSet(infoTabLabels),
+		debugTabs:  newTabSet(debugTabLabels),
+	}
+
+	var names []string
+	for _, pane := range app.paneSpecs() {
+		names = append(names, pane.viewName)
+	}
+
+	assert.Equal(t, []string{viewUnits, viewDetail, viewProc, viewLogs}, names)
+}
