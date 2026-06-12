@@ -99,3 +99,35 @@ func TestFormatProcDetailsShowsNoProcess(t *testing.T) {
 	assert.Contains(t, output, "MainPID")
 	assert.Contains(t, output, "No active main process.")
 }
+
+func TestTabSetCyclesDeterministically(t *testing.T) {
+	tabs := newTabSet([]string{"one", "two", "three"})
+
+	tabs.cycle(1)
+	assert.Equal(t, "two", tabs.current())
+
+	tabs.cycle(-1)
+	assert.Equal(t, "one", tabs.current())
+
+	tabs.cycle(-1)
+	assert.Equal(t, "three", tabs.current())
+}
+
+func TestInfoAndDebugContentFollowActiveTabs(t *testing.T) {
+	app := &app{
+		infoTabs:     newTabSet(infoTabLabels),
+		debugTabs:    newTabSet(debugTabLabels),
+		detail:       "detail content",
+		proc:         "stats content",
+		logs:         "journal content",
+		dependencies: "dependency content",
+	}
+
+	assert.Equal(t, "detail content", app.infoContent())
+	app.infoTabs.cycle(1)
+	assert.Equal(t, "stats content", app.infoContent())
+
+	assert.Equal(t, "journal content", app.debugContent())
+	app.debugTabs.cycle(1)
+	assert.Equal(t, "dependency content", app.debugContent())
+}

@@ -5,9 +5,8 @@ vendored `gocui` UI layer as the terminal foundation.
 
 ## Status
 
-This is an initial scaffold. It can list system units by kind, inspect the
-selected unit, show live process details, show recent journal output, and run
-common `systemctl` actions.
+This is an initial scaffold. It has four stable panes: unit inventory, system
+diagnostics, selected-unit information, and debugging detail.
 
 ## Usage
 
@@ -20,9 +19,9 @@ Keys:
 - `h` / `l` or left/right arrows: switch panes
 - `Tab` / `Shift-Tab`: switch panes
 - `1`-`4`: jump to a pane
-- `j` / `k` or up/down arrows: move in the units pane, scroll in detail panes
+- `j` / `k` or up/down arrows: move in the inventory pane, scroll in other panes
 - `PgUp` / `PgDn`: scroll focused detail pane faster
-- `[` / `]`: cycle unit kind
+- `[` / `]`: cycle tabs in the active pane
 - `/`: filter units
 - `Enter` / `Esc`: leave filter mode
 - `r`: refresh units
